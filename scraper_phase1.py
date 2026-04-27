@@ -3,58 +3,73 @@ import json
 import random
 from playwright.async_api import async_playwright
 
-# Die Liste deiner Produkte für OriginBridge
-PRODUCT_LIST = [
-    "Polyethylene PE", "Ammonium Phosphate", "Urea", 
-    "Pet Coke Calcined", "Sulphur", "Paraffin Wax", 
-    "Pistachio", "Apple Puree Concentrate"
-]
+PRODUCT_LIST = ["Polyethylene PE", "Urea", "Sulphur"] # Erstmal klein zum Testen
 
-async def scrape_product(page, product):
-    print(f"🔍 Suche nach: {product}...")
-    
-    # Zur Suche navigieren
-    await page.goto(f"https://www.europages.co.uk/companies/Search.html?q={product}")
-    await page.wait_for_timeout(random.randint(2000, 4000)) # Zufällige Pause
-
-    # Firmen finden (Überschriften h2)
-    companies = await page.query_selector_all("h2")
-    
-    results = []
-    for company in companies[:15]: # Die Top 15 pro Produkt
-        name = await company.inner_text()
-        if name.strip() and "Visable" not in name: # Filtert die Eigenwerbung von Europages aus
-            results.append({
-                "company_name": name.strip(),
-                "category": product,
-                "source": "Europages"
-            })
-    return results
+async def scrape_supplier_details(page, profile_url):
+    """Besucht die Profilseite einer Firma und sammelt alles ein."""
+    try:
+        await page.goto(profile_url)
+        await page.wait_for_timeout(random.randint(1000, 2000))
+        
+        # Wir holen uns den gesamten sichtbaren Text der Seite
+        # Die KI wird später daraus ISO, Adresse und Website extrahieren
+        content = await page.evaluate("() => document.body.innerText")
+        
+        # Wir versuchen, die Website-URL direkt zu finden, falls vorhanden
+        website_element = await page.query_selector("a[href*='http']")
+        website = await website_element.get_attribute("href") if website_element else "N/A"
+        
+        return {
+            "raw_text": content[:2000], # Die ersten 2000 Zeichen reichen meistens
+            "supplier_website": website
+        }
+    except:
+        return {"raw_text": "Error loading details", "supplier_website": "N/A"}
 
 async def main():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False) # Headless=True für Speed später
-        page = await browser.new_page()
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
         
-        # Einmalig Cookies akzeptieren
         await page.goto("https://www.europages.co.uk/")
         try:
             await page.get_by_role("button", name="ACCEPT ALL").click(timeout=5000)
-        except:
-            pass
+        except: pass
 
-        all_data = []
+        all_suppliers = []
 
         for prod in PRODUCT_LIST:
-            data = await scrape_product(page, prod)
-            all_data.extend(data)
-            print(f"✅ {len(data)} Firmen für {prod} gefunden.")
+            print(f"🔍 Suche läuft für: {prod}")
+            await page.goto(f"https://www.europages.co.uk/companies/Search.html?q={prod}")
+            await page.wait_for_timeout(3000)
+
+            # Wir suchen die Links zu den Firmenprofilen
+            links = await page.query_selector_all("a.company-name")
             
-        # Speichern als JSON
-        with open("suppliers_raw.json", "w", encoding="utf-8") as f:
-            json.dump(all_data, f, ensure_ascii=False, indent=4)
+            # Wir nehmen die ersten 5 Firmen pro Produkt zum Testen (Deep Scraping dauert länger)
+            profile_urls = []
+            for link in links[:5]:
+                href = await link.get_attribute("href")
+                if href:
+                    profile_urls.append("https://www.europages.co.uk" + href)
+
+            for url in profile_urls:
+                print(f"  📄 Extrahiere Details von: {url}")
+                details = await scrape_supplier_details(page, url)
+                
+                all_suppliers.append({
+                    "product": prod,
+                    "profile_url": url,
+                    "details": details["raw_text"],
+                    "website": details["supplier_website"]
+                })
+
+        # Speichern der "rohen" Daten für die KI
+        with open("deep_suppliers_raw.json", "w", encoding="utf-8") as f:
+            json.dump(all_suppliers, f, ensure_ascii=False, indent=4)
         
-        print("\n🏆 Phase 1-A abgeschlossen! Datei 'suppliers_raw.json' wurde erstellt.")
+        print("\n✅ Deep Scraping abgeschlossen! Datei 'deep_suppliers_raw.json' bereit.")
         await browser.close()
 
 if __name__ == "__main__":
